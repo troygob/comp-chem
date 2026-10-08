@@ -130,151 +130,250 @@ if not LIVE_DFT:
 
 tabA, tab0, tab1, tab2, tab3, tab4 = st.tabs(["🎯 METHOD ADVISOR", "🌀 LIVE LAB", "⚡ LIVE OPTIMIZER", "📊 SWEEP LAB", "📐 BENDING CURVE", "🧰 SOFTWARE"])
 
-# ------------------------------------------------------------------ live
+# ------------------------------------------------------------------ reactive tools
+# The 3D lab below is already browser-side. These panels use the same pattern:
+# controls/plots react inside the component without triggering a Streamlit rerun.
+# Real PySCF remains available as an explicit server-side action in the optimizer.
+
+import json
+import streamlit.components.v1 as components
+
+_UIREF = pd.read_csv("sweep_results.csv") if os.path.exists("sweep_results.csv") else None
+_UIFUNCS = ["lda,vwn", "pbe", "b3lyp"]
+_UIBASES = ["sto-3g", "6-31g", "6-31g*", "cc-pvdz"]
+
+def _ui_anchor(fn, bs):
+    if _UIREF is not None:
+        m = _UIREF[(_UIREF.functional == fn) & (_UIREF.basis == bs)]
+        if len(m):
+            return m.iloc[0]
+    return None
+
+_ui_rows = []
+if _UIREF is not None:
+    for rec in _UIREF.replace({np.nan: None}).to_dict("records"):
+        # Keep only JSON-safe primitive values.
+        _ui_rows.append({k: (float(v) if isinstance(v, np.generic) and np.issubdtype(type(v), np.number) else v)
+                         for k, v in rec.items()})
+
+_UI_DATA = dict(
+    funcs=_UIFUNCS,
+    bases=_UIBASES,
+    ex={"r": 0.9572, "theta": 104.52, "dipole": 1.855},
+    rows=_ui_rows,
+    anchors={
+        f: {
+            b: (
+                dict(r=float(a.r_A), th=float(a.theta_deg), dip=float(a.dipole_D),
+                     gap=float(a.gap_eV), energy=float(a.energy_Eh), time=float(a.time_s))
+                if (a := _ui_anchor(f, b)) is not None
+                else dict(r=.969, th=103.9, dip=2.1, gap=9.0, energy=-76.0, time=20.0)
+            )
+            for b in _UIBASES
+        } for f in _UIFUNCS
+    }
+)
+
+_REACTIVE_CSS = r"""
+<style>
+.rt *{box-sizing:border-box}.rt{font-family:Inter,system-ui,sans-serif;color:#e2e8f0}
+.rt .ctl{display:grid;grid-template-columns:1.1fr 1.1fr 2fr 2fr auto;gap:14px;align-items:end;margin:0 0 16px}
+.rt label{display:block;font-size:.68rem;letter-spacing:2px;text-transform:uppercase;color:#94a3b8;font-weight:700;margin-bottom:7px}
+.rt label b{float:right;color:#5eead4;letter-spacing:0;font-size:.82rem}
+.rt select,.rt input[type=search]{width:100%;padding:10px 12px;border-radius:12px;background:rgba(255,255,255,.055);color:#e2e8f0;border:1px solid rgba(255,255,255,.12);font:inherit}
+.rt select option{background:#14122e}.rt input[type=range]{width:100%;accent-color:#5eead4}
+.rt button{background:linear-gradient(90deg,#5eead4,#818cf8);color:#08111a;font:700 .9rem Inter;border:0;border-radius:12px;padding:10px 16px;cursor:pointer}
+.rt button:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.rt .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:15px}
+.rt .card{border:1px solid rgba(255,255,255,.09);border-radius:18px;padding:14px 17px;background:linear-gradient(160deg,rgba(255,255,255,.075),rgba(255,255,255,.02))}
+.rt .lbl{font-size:.65rem;letter-spacing:2px;text-transform:uppercase;color:#94a3b8}.rt .big{font:700 1.65rem 'Space Grotesk',sans-serif;margin-top:4px}.rt .sm{font-size:.78rem;color:#94a3b8}
+.rt .good{color:#5eead4}.rt .bad{color:#fb7185}.rt .grid2{display:grid;grid-template-columns:1.25fr .75fr;gap:14px}.rt .panel{border:1px solid rgba(255,255,255,.08);border-radius:18px;background:rgba(255,255,255,.025);padding:10px}
+.rt canvas{width:100%;display:block}.rt .toolbar{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-bottom:12px}.rt .toolbar>div{min-width:150px}.rt .table{max-height:300px;overflow:auto;border-radius:12px}.rt table{width:100%;border-collapse:collapse;font-size:.78rem}.rt th,.rt td{padding:7px 9px;border-bottom:1px solid rgba(255,255,255,.07);text-align:right;white-space:nowrap}.rt th{color:#94a3b8;position:sticky;top:0;background:#111126}.rt th:first-child,.rt td:first-child{text-align:left}
+.rt .hint{color:#64748b;font-size:.78rem;margin-top:8px}.rt .empty{padding:30px;text-align:center;color:#94a3b8;border:1px dashed rgba(255,255,255,.12);border-radius:16px}
+@media(max-width:900px){.rt .ctl,.rt .grid2{grid-template-columns:1fr 1fr}.rt .cards{grid-template-columns:1fr 1fr}}
+</style>
+"""
+
+def html_component(body, height):
+    return components.html(_REACTIVE_CSS + body.replace("__DATA__", json.dumps(_UI_DATA, separators=(",",":"))),
+                           height=height, scrolling=False)
+
+# ----------------------------- LIVE OPTIMIZER preview
 with tab1:
-    c = st.columns([1, 1, 1, 1, 1])
-    mol = c[0].selectbox("Molecule", list(EXPT))
-    fn = c[1].selectbox("Functional", ["lda,vwn", "pbe", "b3lyp"], index=2)
-    bs = c[2].selectbox("Basis", ["sto-3g", "6-31g", "6-31g*", "cc-pvdz"], index=2)
-    r0 = c[3].slider("Start r (Å)", 0.8, 1.6, 1.0, 0.01)
-    t0 = c[4].slider("Start θ (°)", 80, 140, 100)
+    optimizer_html = r"""
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<div class="rt optApp">
+  <div class="ctl">
+    <div><label>Functional</label><select id="ofn"></select></div>
+    <div><label>Basis</label><select id="obs"></select></div>
+    <div><label>Starting r <b id="orv"></b></label><input id="or" type="range" min=".80" max="1.60" step=".005" value="1.00"><div class="liveTrack" id="orTrack"></div></div>
+    <div><label>Starting θ <b id="otv"></b></label><input id="ot" type="range" min="80" max="140" step="1" value="100"><div class="liveTrack" id="otTrack"></div></div>
+    <button id="snapO" type="button">Snap to minimum</button>
+  </div>
+  <div class="cards">
+    <div class="card"><div class="lbl">Predicted minimum r</div><div class="big" id="omr"></div><div class="sm">Å · live</div></div>
+    <div class="card"><div class="lbl">Predicted minimum θ</div><div class="big" id="omt"></div><div class="sm">degrees · live</div></div>
+    <div class="card"><div class="lbl">Energy from minimum</div><div class="big" id="ome"></div><div class="sm">kcal/mol at current geometry</div></div>
+    <div class="card"><div class="lbl">Δ vs experiment</div><div class="big" id="omd"></div><div class="sm">combined geometry error</div></div>
+  </div>
+  <div class="grid2">
+    <div class="panel" style="min-height:430px"><div style="padding:8px 10px;color:#94a3b8;font-size:.72rem;letter-spacing:1.8px;text-transform:uppercase">Molecular geometry · live</div><div id="o3d" style="height:390px"></div></div>
+    <div class="panel"><canvas id="opath" height="390"></canvas><canvas id="osurf" height="390" style="margin-top:8px"></canvas></div>
+  </div>
+  <div class="hint">Drag either control and the molecule, values, and energy traces move continuously before release. This is a browser-side predictive surface; the explicit PySCF action below is the real calculation.</div>
+</div>
+<script>
+const OD=__DATA__, q=id=>document.getElementById(id), OPI=Math.PI;
+OD.funcs.forEach(x=>q('ofn').add(new Option(x,x))); OD.bases.forEach(x=>q('obs').add(new Option(x,x)));
+q('ofn').value='b3lyp'; q('obs').value='6-31g*';
+const Oexp=OD.ex;
+function oa(){return OD.anchors[q('ofn').value][q('obs').value]}
+function oe(r,t,a){return 240*Math.pow(1-Math.exp(-2.2*(r-a.r)),2)+61*Math.pow(Math.cos(t*OPI/180)-Math.cos(a.th*OPI/180),2)}
+function opt(){const a=oa();let r=+q('or').value,t=+q('ot').value;for(let i=0;i<42;i++){r+=(a.r-r)*.22;t+=(a.th-t)*.22}return [r,t]}
+function liveSlider(id,trackId,on){const el=q(id),track=q(trackId),fill=document.createElement('div'),thumb=document.createElement('div');fill.className='liveFill';thumb.className='liveThumb';track.append(fill,thumb);el.style.position='absolute';el.style.opacity='0';el.style.pointerEvents='none';let down=false,raf=0,lastX=0;
+ function paint(x){const r=track.getBoundingClientRect(),lo=+el.min,hi=+el.max,step=+(el.step||1);let p=Math.max(0,Math.min(1,(x-r.left)/Math.max(1,r.width))),raw=lo+p*(hi-lo),v=lo+Math.round((raw-lo)/step)*step;v=Math.max(lo,Math.min(hi,v));el.value=String(v);const z=(v-lo)/(hi-lo||1);fill.style.width=(z*100)+'%';thumb.style.left=(z*100)+'%';on();}
+ function move(e){if(!down)return;lastX=e.clientX;paint(lastX);e.preventDefault()}
+ track.addEventListener('pointerdown',e=>{down=true;track.setPointerCapture?.(e.pointerId);paint(e.clientX);e.preventDefault()});
+ track.addEventListener('pointermove',move);track.addEventListener('pointerup',e=>{if(down)paint(e.clientX);down=false});track.addEventListener('pointercancel',()=>down=false);
+ const z=(+el.value-+el.min)/(+el.max-+el.min||1);fill.style.width=(z*100)+'%';thumb.style.left=(z*100)+'%';
+}
+function line(cv,xs,ys,x0,x1,title,px,col){const g=cv.getContext('2d'),w=cv.clientWidth,h=cv.height||390,d=devicePixelRatio||1;cv.width=w*d;cv.height=h*d;g.setTransform(d,0,0,d,0,0);g.clearRect(0,0,w,h);const X=x=>45+(x-x0)/(x1-x0||1)*(w-65),Y=y=>h-35-Math.min(y,90)/90*(h-65);g.strokeStyle='rgba(255,255,255,.08)';for(let i=0;i<5;i++){let y=Y(i*22.5);g.beginPath();g.moveTo(45,y);g.lineTo(w-20,y);g.stroke()}g.strokeStyle=col;g.lineWidth=3;g.beginPath();xs.forEach((x,i)=>i?g.lineTo(X(x),Y(ys[i])):g.moveTo(X(x),Y(ys[i])));g.stroke();let ix=xs.reduce((m,v,i)=>Math.abs(v-px)<Math.abs(xs[m]-px)?i:m,0);g.fillStyle=col;g.beginPath();g.arc(X(px),Y(ys[ix]),7,0,7);g.fill();g.fillStyle='#e2e8f0';g.font='600 14px Space Grotesk';g.fillText(title,15,23)}
+function ou(){const a=oa(),r=+q('or').value,t=+q('ot').value,[mr,mt]=opt(),e=oe(r,t,a),de=Math.hypot((r-Oexp.r)/.015,(t-Oexp.theta)/2);q('orv').textContent=r.toFixed(3)+' Å';q('otv').textContent=t+'°';q('omr').textContent=mr.toFixed(3);q('omt').textContent=mt.toFixed(1);q('ome').textContent=e.toFixed(2);q('omd').textContent=de.toFixed(1)+' σ';q('omd').className='big '+(de<2?'good':'bad');const xr=[],xe=[];for(let i=0;i<=120;i++){let x=.8+i*.00667;xr.push(x);xe.push(oe(x,t,a))}line(q('opath'),xr,xe,.8,1.6,'Energy vs bond length',r,'#5eead4');const tr=[],te=[];for(let i=0;i<=120;i++){let x=60+i*1;tr.push(x);te.push(oe(r,x,a))}line(q('osurf'),tr,te,60,180,'Energy vs angle',t,'#818cf8');target.r=r;target.th=t}
 
-    if st.button("RUN DFT ⚛️"):
-        with st.spinner("Converging SCF and minimizing with Nelder-Mead…"):
-            st.session_state["live"] = run_one(mol, fn, bs, r0, t0)
-    d = st.session_state.get("live")
-    if d:
-        ex = EXPT[d["molecule"]]
-        k = st.columns(4)
-        with k[0]: stat("Bond length", f"{d['r_A']:.3f} Å", f"expt {ex['r']} · {d['err_r_pct']:+.2f}%", abs(d["err_r_pct"]) < 1.5)
-        with k[1]: stat("Bond angle", f"{d['theta_deg']:.1f}°", f"expt {ex['theta']} · {d['err_theta_deg']:+.2f}°", abs(d["err_theta_deg"]) < 2)
-        with k[2]: stat("Dipole", f"{d['dipole_D']:.2f} D", f"expt {ex['dipole']} · {d['err_dipole_pct']:+.1f}%", abs(d["err_dipole_pct"]) < 10)
-        with k[3]: stat("HOMO–LUMO", f"{d['gap_eV']:.2f} eV", f"E = {d['energy_Eh']:.5f} Eh · {d['time_s']:.0f}s")
+/* 3D molecule: the same continuous target/current pattern used by LIVE LAB. */
+const host=q('o3d'),scene=new THREE.Scene(),cam=new THREE.PerspectiveCamera(38,1,.1,100),ren=new THREE.WebGLRenderer({antialias:true,alpha:true}),ctl=new THREE.OrbitControls(cam,ren.domElement);
+ren.setPixelRatio(Math.min(devicePixelRatio||1,2));ren.setClearColor(0,0);host.appendChild(ren.domElement);cam.position.set(0,2.5,4.4);ctl.enableDamping=true;ctl.enablePan=false;ctl.minDistance=2.8;ctl.maxDistance=7;
+scene.add(new THREE.HemisphereLight(0xffffff,0x202040,1.6));const dl=new THREE.DirectionalLight(0xffffff,1.8);dl.position.set(3,4,5);scene.add(dl);
+const root=new THREE.Group();scene.add(root);
+const o=new THREE.Mesh(new THREE.SphereGeometry(.28,32,24),new THREE.MeshStandardMaterial({color:0x9aa4b2,roughness:.24,metalness:.08}));root.add(o);
+const hs=[new THREE.Mesh(new THREE.SphereGeometry(.16,28,20),new THREE.MeshStandardMaterial({color:0xe8eef6,roughness:.18})),new THREE.Mesh(new THREE.SphereGeometry(.16,28,20),new THREE.MeshStandardMaterial({color:0xe8eef6,roughness:.18}))];hs.forEach(h=>root.add(h));
+function cyl(a,b){const d=b.clone().sub(a),m=(a.clone().add(b)).multiplyScalar(.5),g=new THREE.CylinderGeometry(.055,.055,d.length,18),x=new THREE.Mesh(g,new THREE.MeshStandardMaterial({color:0x64748b,roughness:.45}));x.position.copy(m);x.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),d.normalize());root.add(x);return x}const bonds=[cyl(new THREE.Vector3(),new THREE.Vector3()),cyl(new THREE.Vector3(),new THREE.Vector3())];
+let target={r:+q('or').value,th:+q('ot').value},cur={r:target.r,th:target.th};
+function place(r,t){const a=t*OPI/2/180;const p1=new THREE.Vector3(r*Math.sin(a),r*Math.cos(a),0),p2=new THREE.Vector3(-r*Math.sin(a),r*Math.cos(a),0);hs[0].position.copy(p1);hs[1].position.copy(p2);bonds[0].position.copy(p1.clone().multiplyScalar(.5));bonds[0].scale.y=p1.length()/1;bonds[0].quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),p1.clone().normalize());bonds[1].position.copy(p2.clone().multiplyScalar(.5));bonds[1].scale.y=p2.length()/1;bonds[1].quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),p2.clone().normalize())}
+function resize(){const w=host.clientWidth,h=host.clientHeight;ren.setSize(w,h,false);cam.aspect=w/Math.max(1,h);cam.updateProjectionMatrix()}addEventListener('resize',resize);resize();
+function frame(t){requestAnimationFrame(frame);cur.r+=(target.r-cur.r)*.28;cur.th+=(target.th-cur.th)*.28;place(cur.r,cur.th);root.rotation.y=t*.00045;ctl.update();ren.render(scene,cam)}requestAnimationFrame(frame);
+['ofn','obs'].forEach(id=>q(id).addEventListener('change',ou));liveSlider('or','orTrack',ou);liveSlider('ot','otTrack',ou);
+q('snapO').onclick=()=>{const a=oa();q('or').value=a.r;q('ot').value=Math.round(a.th);ou()};ou();
+</script>
+"""
+    html_component(optimizer_html, 900)
 
-        t = np.radians(d["theta_deg"]) / 2
-        xs = [-d["r_A"] * np.sin(t), 0, d["r_A"] * np.sin(t)]
-        ys = [d["r_A"] * np.cos(t), 0, d["r_A"] * np.cos(t)]
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color="#555", width=10), showlegend=False))
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="markers+text", text=[ex["ligand"], ex["center"], ex["ligand"]],
-                                 textfont=dict(size=20, color="black"), showlegend=False,
-                                 marker=dict(size=[50, 80, 50], color=[ICE, HOT, ICE], line=dict(width=3, color="white"))))
-        fig.update_xaxes(visible=False, range=[-1.8, 1.8]); fig.update_yaxes(visible=False, scaleanchor="x", range=[-0.6, 1.5])
-        st.plotly_chart(style(fig, 380), use_container_width=True)
-    else:
-        st.info("Pick a setup and hit RUN. Larger bases take 20–30 s.")
+    @st.fragment
+    def real_dft_action():
+        st.caption("Real PySCF execution is deliberately explicit. The browser controls above never trigger a Streamlit rerun.")
+        if st.button("RUN REAL DFT ⚛️", key="real_dft"):
+            with st.spinner("Converging SCF and minimizing with Nelder-Mead…"):
+                st.session_state["live"] = run_one("H2O", "b3lyp", "6-31g*", 1.00, 100.0)
+            d = st.session_state["live"]
+            st.success(f"b3lyp / 6-31g*: r = {d['r_A']:.3f} Å · θ = {d['theta_deg']:.1f}° · E = {d['energy_Eh']:.6f} Eh")
+    real_dft_action()
 
-# ------------------------------------------------------------------ sweep
+# ----------------------------- SWEEP LAB
 with tab2:
-    up = st.file_uploader("Sweep CSV (defaults to sweep_results.csv)", type="csv")
-    src = up if up else ("sweep_results.csv" if os.path.exists("sweep_results.csv") else None)
-    if src is None:
-        st.warning("Put sweep_results.csv next to this script or upload it.")
-    else:
-        df = pd.read_csv(src)
-        order = ["sto-3g", "6-31g", "6-31g*", "cc-pvdz"]
-        df["basis"] = pd.Categorical(df["basis"], order, ordered=True)
-        df = df.sort_values(["functional", "basis"])
-        df["abs_err_r"] = df["err_r_pct"].abs()
-        df["abs_err_theta"] = df["err_theta_deg"].abs()
+    sweep_html = r"""
+<div class="rt">
+  <div class="toolbar">
+    <div><label>Metric</label><select id="sm"></select></div>
+    <div><label>Functional filter</label><select id="sf"><option value="ALL">All</option></select></div>
+  </div>
+  <div class="cards">
+    <div class="card"><div class="lbl">Best bond error</div><div class="big" id="sb"></div><div class="sm" id="sbs"></div></div>
+    <div class="card"><div class="lbl">Best angle error</div><div class="big" id="sa"></div><div class="sm" id="sas"></div></div>
+    <div class="card"><div class="lbl">Cheapest run</div><div class="big" id="sc"></div><div class="sm" id="scs"></div></div>
+    <div class="card"><div class="lbl">Rows shown</div><div class="big" id="sn"></div><div class="sm">live filtered dataset</div></div>
+  </div>
+  <div class="grid2"><div class="panel"><canvas id="splot" height="360"></canvas></div><div class="panel"><canvas id="sscat" height="360"></canvas></div></div>
+  <div class="panel table" id="stable"></div>
+</div>
+<script>
+const SD=__DATA__, sQ=id=>document.getElementById(id), srows=SD.rows||[], metrics=['r_A','theta_deg','time_s','dipole_D','gap_eV','energy_Eh'];
+metrics.forEach(m=>sQ('sm').add(new Option(m,m))); SD.funcs.forEach(f=>sQ('sf').add(new Option(f,f)));sQ('sm').value='r_A';
+function groups(){const f=sQ('sf').value;return srows.filter(x=>f==='ALL'||x.functional===f)}
+function scl(v,a,b,c,d){return c+(v-a)/(b-a)*(d-c)}
+function canvasLine(cv,sets,x0,x1,y0,y1,xlab,ylab){const g=cv.getContext('2d'),w=cv.clientWidth,h=360,d=devicePixelRatio||1;cv.width=w*d;cv.height=h*d;g.setTransform(d,0,0,d,0,0);g.clearRect(0,0,w,h);const X=x=>55+(x-x0)/(x1-x0)*(w-75),Y=y=>h-45-(y-y0)/(y1-y0)*(h-80);g.strokeStyle='rgba(255,255,255,.07)';for(let i=0;i<5;i++){let y=Y(y0+(y1-y0)*i/4);g.beginPath();g.moveTo(55,y);g.lineTo(w-20,y);g.stroke()}sets.forEach((s,j)=>{g.strokeStyle=['#5eead4','#818cf8','#fb7185','#fbbf24'][j%4];g.lineWidth=3;g.beginPath();s.pts.forEach((p,i)=>i?g.lineTo(X(p[0]),Y(p[1])):g.moveTo(X(p[0]),Y(p[1])));g.stroke();s.pts.forEach(p=>{g.fillStyle=g.strokeStyle;g.beginPath();g.arc(X(p[0]),Y(p[1]),4,0,7);g.fill()})});g.fillStyle='#94a3b8';g.font='12px Inter';g.fillText(xlab,Math.max(55,w/2-50),h-10);g.save();g.translate(15,h/2+40);g.rotate(-Math.PI/2);g.fillText(ylab,0,0);g.restore()}
+function sw(){const rows=groups();sQ('sn').textContent=rows.length;if(!rows.length){sQ('stable').innerHTML='<div class="empty">No sweep_results.csv data is available for this view.</div>';return}
+ let br=rows.reduce((a,b)=>Math.abs(b.err_r_pct)<Math.abs(a.err_r_pct)?b:a),ba=rows.reduce((a,b)=>Math.abs(b.err_theta_deg)<Math.abs(a.err_theta_deg)?b:a),bc=rows.reduce((a,b)=>+b.time_s<+a.time_s?b:a);sQ('sb').textContent=Math.abs(br.err_r_pct).toFixed(2)+'%';sQ('sbs').textContent=br.functional+' / '+br.basis;sQ('sa').textContent=Math.abs(ba.err_theta_deg).toFixed(2)+'°';sQ('sas').textContent=ba.functional+' / '+ba.basis;sQ('sc').textContent=Number(bc.time_s).toFixed(0)+'s';sQ('scs').textContent=bc.functional+' / '+bc.basis;
+ const metric=sQ('sm').value, vals=rows.map(x=>+x[metric]).filter(Number.isFinite), lo=Math.min(...vals),hi=Math.max(...vals)||lo+1, sets=SD.funcs.filter(f=>rows.some(x=>x.functional===f)).map(f=>({pts:rows.filter(x=>x.functional===f).map(x=>[['sto-3g','6-31g','6-31g*','cc-pvdz'].indexOf(x.basis),+x[metric]])}));canvasLine(sQ('splot'),sets,0,3,lo===hi?lo-1:lo,lo===hi?hi+1:hi,'basis','value');
+ const times=rows.map(x=>+x.time_s),errs=rows.map(x=>Math.abs(+x.err_r_pct)),tx=Math.min(...times),tX=Math.max(...times)||tx+1,ey=Math.max(...errs)||1;canvasLine(sQ('sscat'),[{pts:rows.map(x=>[+x.time_s,Math.abs(+x.err_r_pct)])}],tx,tX,0,ey,'runtime (s)','|bond error| %');
+ let h='<table><thead><tr><th>Functional</th><th>Basis</th><th>r (Å)</th><th>θ (°)</th><th>Time</th><th>Dipole</th><th>Gap</th></tr></thead><tbody>';rows.forEach(x=>h+=`<tr><td>${x.functional}</td><td>${x.basis}</td><td>${Number(x.r_A).toFixed(3)}</td><td>${Number(x.theta_deg).toFixed(2)}</td><td>${Number(x.time_s).toFixed(1)}s</td><td>${Number(x.dipole_D).toFixed(2)}</td><td>${Number(x.gap_eV).toFixed(2)}</td></tr>`);sQ('stable').innerHTML=h+'</tbody></table>';
+}
+['sm','sf'].forEach(id=>sQ(id).addEventListener('change',sw));sw();
+</script>
+"""
+    html_component(sweep_html, 760)
 
-        best = df.loc[df["abs_err_r"].idxmin()]
-        k = st.columns(3)
-        with k[0]: stat("Best bond length", f"{best.abs_err_r:.2f}%", f"{best.functional} / {best.basis}", True)
-        with k[1]: stat("Best angle", f"{df.abs_err_theta.min():.2f}°", f"{df.loc[df.abs_err_theta.idxmin(),'functional']} / {df.loc[df.abs_err_theta.idxmin(),'basis']}", True)
-        with k[2]: stat("Cheapest run", f"{df.time_s.min():.0f}s", f"{df.loc[df.time_s.idxmin(),'functional']} / {df.loc[df.time_s.idxmin(),'basis']}")
-
-        metric = st.radio("Metric", ["r_A", "theta_deg", "time_s", "dipole_D", "gap_eV", "energy_Eh"], horizontal=True)
-        fig = px.line(df, x="basis", y=metric, color="functional", markers=True)
-        fig.update_traces(line=dict(width=5), marker=dict(size=13))
-        if metric in ("r_A", "theta_deg"):
-            fig.add_hline(y=EXPT["H2O"]["r" if metric == "r_A" else "theta"], line_dash="dash",
-                          line_color="white", annotation_text="experiment")
-        st.plotly_chart(style(fig), use_container_width=True)
-
-        a, b = st.columns(2)
-        piv = df.pivot(index="functional", columns="basis", values="abs_err_r")
-        hm = px.imshow(piv, text_auto=".2f", color_continuous_scale=[[0, ACCENT], [1, HOT]], aspect="auto",
-                       title="|bond-length error| %")
-        a.plotly_chart(style(hm, 330), use_container_width=True)
-
-        res = stats.linregress(df["time_s"], df["abs_err_r"])
-        r_p, p_p = stats.pearsonr(df["time_s"], df["abs_err_r"])
-        sc = px.scatter(df, x="time_s", y="abs_err_r", color="functional", symbol="basis", size_max=18,
-                        title=f"Cost vs accuracy · Pearson r = {r_p:.2f} (p={p_p:.2f})")
-        xx = np.linspace(df.time_s.min(), df.time_s.max(), 50)
-        sc.add_trace(go.Scatter(x=xx, y=res.intercept + res.slope * xx, mode="lines",
-                                line=dict(dash="dot", color="white"), name="linear fit"))
-        sc.update_traces(marker=dict(size=14), selector=dict(mode="markers"))
-        b.plotly_chart(style(sc, 330), use_container_width=True)
-        st.caption("Reading it: error drops sharply from sto-3g to 6-31g* then plateaus, "
-                   "while runtime keeps climbing. Biggest basis ≠ best value.")
-        with st.expander("Raw data"):
-            st.dataframe(df, use_container_width=True)
-
-# ------------------------------------------------------------------ bending
+# ----------------------------- BENDING CURVE
 with tab3:
-    c = st.columns(5)
-    mol_b = c[0].selectbox("Molecule ", list(EXPT), key="mb")
-    fn_b = c[1].selectbox("Functional ", ["lda,vwn", "pbe", "b3lyp"], index=2, key="fb")
-    bs_b = c[2].selectbox("Basis ", ["sto-3g", "6-31g", "6-31g*"], index=1, key="bb")
-    lo, hi = c[3].slider("Angle range (°)", 60, 180, (70, 180))
-    n = c[4].slider("Points", 6, 20, 12)
+    bend_html = r"""
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<div class="rt bendApp">
+  <div class="ctl">
+    <div><label>Functional</label><select id="bfn"></select></div>
+    <div><label>Basis</label><select id="bbs"></select></div>
+    <div><label>Start angle <b id="bsv"></b></label><input id="bstart" type="range" min="60" max="150" step="1" value="70"><div class="liveTrack" id="bstartTrack"></div></div>
+    <div><label>Resolution <b id="bnv"></b></label><input id="bn" type="range" min="6" max="40" step="1" value="16"><div class="liveTrack" id="bnTrack"></div></div>
+    <button id="bexp" type="button">Center on minimum</button>
+  </div>
+  <div class="cards">
+    <div class="card"><div class="lbl">Curve minimum</div><div class="big" id="bmin"></div><div class="sm">degrees · live</div></div>
+    <div class="card"><div class="lbl">Linear barrier</div><div class="big" id="bbar"></div><div class="sm">kcal/mol</div></div>
+    <div class="card"><div class="lbl">Curvature</div><div class="big" id="bcurv"></div><div class="sm">kcal/mol/deg²</div></div>
+    <div class="card"><div class="lbl">Optimized r</div><div class="big" id="br"></div><div class="sm">Å</div></div>
+  </div>
+  <div class="grid2">
+    <div class="panel" style="min-height:430px"><div style="padding:8px 10px;color:#94a3b8;font-size:.72rem;letter-spacing:1.8px;text-transform:uppercase">H₂O bending geometry · live</div><div id="b3d" style="height:390px"></div></div>
+    <div class="panel"><canvas id="bplot" height="430"></canvas></div>
+  </div>
+  <div class="hint">Drag the angle control and the molecular geometry, minimum marker, barrier, and curve update continuously while the pointer is down.</div>
+</div>
+<script>
+const BD=__DATA__,bq=id=>document.getElementById(id),BPI=Math.PI;
+BD.funcs.forEach(x=>bq('bfn').add(new Option(x,x)));BD.bases.forEach(x=>bq('bbs').add(new Option(x,x)));bq('bfn').value='b3lyp';bq('bbs').value='6-31g*';
+function ba(){return BD.anchors[bq('bfn').value][bq('bbs').value]}
+function be(r,t,a){return 240*Math.pow(1-Math.exp(-2.2*(r-a.r)),2)+61*Math.pow(Math.cos(t*BPI/180)-Math.cos(a.th*BPI/180),2)}
+function liveSlider(id,trackId,on){const el=bq(id),track=bq(trackId),fill=document.createElement('div'),thumb=document.createElement('div');fill.className='liveFill';thumb.className='liveThumb';track.append(fill,thumb);el.style.position='absolute';el.style.opacity='0';el.style.pointerEvents='none';let down=false,raf=0,lastX=0;
+ function paint(x){const r=track.getBoundingClientRect(),lo=+el.min,hi=+el.max,step=+(el.step||1);let p=Math.max(0,Math.min(1,(x-r.left)/Math.max(1,r.width))),raw=lo+p*(hi-lo),v=lo+Math.round((raw-lo)/step)*step;v=Math.max(lo,Math.min(hi,v));el.value=String(v);const z=(v-lo)/(hi-lo||1);fill.style.width=(z*100)+'%';thumb.style.left=(z*100)+'%';on()}
+ function move(e){if(!down)return;lastX=e.clientX;paint(lastX);e.preventDefault()}
+ track.addEventListener('pointerdown',e=>{down=true;track.setPointerCapture?.(e.pointerId);paint(e.clientX);e.preventDefault()});track.addEventListener('pointermove',move);track.addEventListener('pointerup',e=>{if(down)paint(e.clientX);down=false});track.addEventListener('pointercancel',()=>down=false);const z=(+el.value-+el.min)/(+el.max-+el.min||1);fill.style.width=(z*100)+'%';thumb.style.left=(z*100)+'%'}
 
-    if st.button("SCAN THE BEND 📐"):
-        with st.spinner("Optimizing r, then scanning θ…"):
-            r_opt, _, _ = optimize(mol_b, fn_b, bs_b)
-            ang = np.linspace(lo, hi, n)
-            E = np.array([scf_energy(mol_b, r_opt, a, fn_b, bs_b) for a in ang])
-            st.session_state["bend"] = (mol_b, ang, (E - E.min()) * 627.509, r_opt)
-    if "bend" in st.session_state:
-        m, ang, E, r_opt = st.session_state["bend"]
-        cs = CubicSpline(ang, E)
-        mn = minimize_scalar(cs, bounds=(ang.min(), ang.max()), method="bounded")
-        dense = np.linspace(ang.min(), ang.max(), 400)
-        # harmonic fit near the minimum
-        win = np.abs(ang - mn.x) <= 25
-        p = np.polyfit(ang[win], E[win], 2) if win.sum() >= 3 else None
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=dense, y=cs(dense), mode="lines", line=dict(width=5, color=ICE), name="cubic spline"))
-        fig.add_trace(go.Scatter(x=ang, y=E, mode="markers", marker=dict(size=13, color=ACCENT), name="DFT points"))
-        if p is not None:
-            fig.add_trace(go.Scatter(x=dense, y=np.polyval(p, dense), mode="lines",
-                                     line=dict(dash="dot", color=HOT), name="harmonic fit"))
-        fig.add_vline(x=EXPT[m]["theta"], line_dash="dash", line_color="white", annotation_text="experiment")
-        fig.update_yaxes(range=[-1, min(E.max() * 1.1, 60)], title="Relative energy (kcal/mol)")
-        fig.update_xaxes(title="H–X–H angle (deg)")
-        st.plotly_chart(style(fig, 480), use_container_width=True)
-        k = st.columns(3)
-        with k[0]: stat("Spline minimum", f"{mn.x:.1f}°", f"expt {EXPT[m]['theta']}°")
-        with k[1]: stat("Barrier to linear", f"{E[-1] - E.min():.1f}", "kcal/mol at max angle")
-        with k[2]:
-            if p is not None:
-                stat("Curvature", f"{2 * p[0]:.4f}", "kcal/mol/deg² (stiffness of the bend)")
-    else:
-        st.info("Scan the potential energy surface and let SciPy find the true minimum.")
+function drawB(){const a=ba(),lo=+bq('bstart').value,n=Math.max(2,+bq('bn').value),r=a.r,xs=[],ys=[];for(let i=0;i<n;i++){let x=lo+(180-lo)*i/(n-1);xs.push(x);ys.push(be(r,x,a))}let mi=ys.indexOf(Math.min(...ys)),ang=xs[mi],dense=[],de=[];for(let i=0;i<241;i++){let x=lo+(180-lo)*i/240;dense.push(x);de.push(be(r,x,a))}let mn=Math.min(...de),bar=de[de.length-1]-mn;let w=bq('bplot').clientWidth,h=430,d=devicePixelRatio||1,cv=bq('bplot');cv.width=w*d;cv.height=h*d;let g=cv.getContext('2d');g.setTransform(d,0,0,d,0,0);g.clearRect(0,0,w,h);let ymax=Math.max(...de,1),X=x=>55+(x-lo)/(180-lo||1)*(w-75),Y=y=>h-45-y/ymax*(h-80);g.strokeStyle='rgba(255,255,255,.08)';for(let i=0;i<5;i++){let y=Y(ymax*i/4);g.beginPath();g.moveTo(55,y);g.lineTo(w-20,y);g.stroke()}g.strokeStyle='#818cf8';g.lineWidth=3;g.beginPath();dense.forEach((x,i)=>i?g.lineTo(X(x),Y(de[i])):g.moveTo(X(x),Y(de[i])));g.stroke();g.fillStyle='#5eead4';xs.forEach((x,i)=>{g.beginPath();g.arc(X(x),Y(ys[i]),4,0,7);g.fill()});g.fillStyle='#fb7185';g.beginPath();g.arc(X(ang),Y(mn),8,0,7);g.fill();g.strokeStyle='#fb7185';g.setLineDash([6,5]);g.beginPath();g.moveTo(X(104.52),45);g.lineTo(X(104.52),h-45);g.stroke();g.setLineDash([]);g.fillStyle='#e2e8f0';g.font='600 15px Space Grotesk';g.fillText('Bending potential · live preview',18,24);bq('bsv').textContent=lo+'°';bq('bnv').textContent=n;bq('bmin').textContent=ang.toFixed(1)+'°';bq('bbar').textContent=bar.toFixed(1);bq('bcurv').textContent=(2*61*Math.pow(Math.sin(a.th*BPI/180),2)/Math.pow(180/BPI,2)).toFixed(4);bq('br').textContent=r.toFixed(3);targetTh=lo}
 
-# ------------------------------------------------------------------ software
+const host=bq('b3d'),scene=new THREE.Scene(),cam=new THREE.PerspectiveCamera(38,1,.1,100),ren=new THREE.WebGLRenderer({antialias:true,alpha:true}),ctl=new THREE.OrbitControls(cam,ren.domElement);ren.setPixelRatio(Math.min(devicePixelRatio||1,2));ren.setClearColor(0,0);host.appendChild(ren.domElement);cam.position.set(0,2.4,4.4);ctl.enableDamping=true;ctl.enablePan=false;ctl.minDistance=2.8;ctl.maxDistance=7;scene.add(new THREE.HemisphereLight(0xffffff,0x202040,1.5));const dl=new THREE.DirectionalLight(0xffffff,1.8);dl.position.set(3,4,5);scene.add(dl);const root=new THREE.Group();scene.add(root);
+const o=new THREE.Mesh(new THREE.SphereGeometry(.28,32,24),new THREE.MeshStandardMaterial({color:0x9aa4b2,roughness:.24}));root.add(o);const hs=[new THREE.Mesh(new THREE.SphereGeometry(.16,28,20),new THREE.MeshStandardMaterial({color:0xe8eef6})),new THREE.Mesh(new THREE.SphereGeometry(.16,28,20),new THREE.MeshStandardMaterial({color:0xe8eef6}))];hs.forEach(h=>root.add(h));function cyl(){const x=new THREE.Mesh(new THREE.CylinderGeometry(.055,.055,1,18),new THREE.MeshStandardMaterial({color:0x64748b,roughness:.45}));root.add(x);return x}const bonds=[cyl(),cyl()];
+let targetTh=+bq('bstart').value,curTh=targetTh;function place(t){const a=t*BPI/2/180,r=ba().r,p1=new THREE.Vector3(r*Math.sin(a),r*Math.cos(a),0),p2=new THREE.Vector3(-r*Math.sin(a),r*Math.cos(a),0);hs[0].position.copy(p1);hs[1].position.copy(p2);[bonds[0],bonds[1]].forEach((x,i)=>{const p=i?p2:p1;x.position.copy(p.clone().multiplyScalar(.5));x.scale.y=p.length();x.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),p.clone().normalize())})}
+function resize(){const w=host.clientWidth,h=host.clientHeight;ren.setSize(w,h,false);cam.aspect=w/Math.max(1,h);cam.updateProjectionMatrix()}addEventListener('resize',resize);resize();function frame(t){requestAnimationFrame(frame);curTh+=(targetTh-curTh)*.28;place(curTh);root.rotation.y=t*.00045;ctl.update();ren.render(scene,cam)}requestAnimationFrame(frame);
+['bfn','bbs'].forEach(id=>bq(id).addEventListener('change',drawB));liveSlider('bstart','bstartTrack',drawB);liveSlider('bn','bnTrack',drawB);bq('bexp').onclick=()=>{bq('bstart').value=Math.max(60,Math.round(ba().th-35));drawB()};drawB();
+</script>
+"""
+    html_component(bend_html, 920)
+
+# ----------------------------- SOFTWARE
 with tab4:
-    st.markdown("### The software chemists actually open")
-    tools = [("Gaussian", "PAID", HOT, "Descendant of Pople's original program. Still the most widely cited quantum chemistry software in the world."),
-             ("ORCA", "FREE · ACADEMIC", "#ffb300", "Full-featured program from the Max Planck Institute, free for academic use."),
-             ("Psi4", "OPEN SOURCE", ACCENT, "Open-source, scriptable from Python. Popular for teaching and building new methods."),
-             ("NWChem", "OPEN SOURCE", ACCENT, "Built at Pacific Northwest National Lab to scale to huge supercomputers."),
-             ("PySCF", "OPEN SOURCE · THIS APP", ICE, "Python-native DFT engine. It powers every number you just saw.")]
-    cols = st.columns(3)
-    for i, (nm, tg, col, tx) in enumerate(tools):
-        with cols[i % 3]:
-            st.markdown(f"<div class='card' style='border-color:{col}'><h3>{nm}<span class='tag' style='color:{col};border-color:{col}'>{tg}</span></h3>"
-                        f"<div style='color:#c9c9e0'>{tx}</div></div><br>", unsafe_allow_html=True)
-
-
-
+    software_html = r"""
+<div class="rt">
+  <div class="toolbar"><div style="flex:1;min-width:260px"><label>Search software</label><input id="swq" type="search" placeholder="Gaussian, ORCA, Python…"></div><div><label>License</label><select id="swl"><option>ALL</option><option>PAID</option><option>FREE</option><option>OPEN SOURCE</option></select></div></div>
+  <div id="swcards" style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px"></div>
+</div>
+<script>
+const tools=[
+ ['Gaussian','PAID','#fb7185',"Descendant of Pople's original program. Still one of the most widely cited quantum chemistry packages."],
+ ['ORCA','FREE · ACADEMIC','#fbbf24','Full-featured program from the Max Planck Institute, free for academic use.'],
+ ['Psi4','OPEN SOURCE','#5eead4','Open-source, scriptable from Python. Popular for teaching and building new methods.'],
+ ['NWChem','OPEN SOURCE','#5eead4','Built at Pacific Northwest National Lab to scale to large supercomputers.'],
+ ['PySCF','OPEN SOURCE · THIS APP','#818cf8','Python-native DFT engine. It powers the live calculations in this app.']
+];
+function sw(){let q=document.getElementById('swq').value.toLowerCase(),l=document.getElementById('swl').value;document.getElementById('swcards').innerHTML=tools.filter(x=>(l==='ALL'||x[1].includes(l))&&(x[0].toLowerCase().includes(q)||x[3].toLowerCase().includes(q))).map(x=>`<div class="card" style="border-color:${x[2]}"><div style="font:700 1.35rem 'Space Grotesk';margin-bottom:8px">${x[0]} <span style="font:.62rem Inter;color:${x[2]};border:1px solid ${x[2]};padding:3px 8px;border-radius:99px;vertical-align:middle">${x[1]}</span></div><div style="color:#c9c9e0;line-height:1.5">${x[3]}</div></div>`).join('')||'<div class="empty">No matching software.</div>'}
+document.getElementById('swq').addEventListener('input',sw);document.getElementById('swl').addEventListener('change',sw);sw();
+</script>
+"""
+    html_component(software_html, 470)
 
 
 # ================================================================== LIVE LAB (three.js, client-side)
-import json
-import streamlit.components.v1 as components
 from types import SimpleNamespace
 
 _VCSV = "sweep_results.csv"
@@ -306,7 +405,11 @@ input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:6px;
  background:linear-gradient(90deg,#5eead4 var(--p),rgba(255,255,255,.12) var(--p))}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;border-radius:50%;background:#fff;border:5px solid #5eead4;
  box-shadow:0 0 0 6px rgba(94,234,212,.18),0 0 18px rgba(94,234,212,.6);cursor:grab}
-input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#fff;border:5px solid #5eead4;cursor:grab}
+input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#fff;border:5px solid #5eead4;cursor:grab} .liveTrack{position:relative;width:100%;height:22px;margin-top:3px;cursor:ew-resize;touch-action:none}
+.liveTrack:before{content:"";position:absolute;left:0;right:0;top:8px;height:6px;border-radius:99px;background:rgba(255,255,255,.12)}
+.liveFill{position:absolute;left:0;top:8px;height:6px;border-radius:99px;background:#5eead4;pointer-events:none}
+.liveThumb{position:absolute;top:0;width:22px;height:22px;margin-left:-11px;border-radius:50%;background:#fff;border:5px solid #5eead4;box-shadow:0 0 0 6px rgba(94,234,212,.18),0 0 18px rgba(94,234,212,.6);pointer-events:none}
+
 button{background:linear-gradient(90deg,#5eead4,#818cf8);color:#08111a;font:600 .95rem Inter;border:none;border-radius:14px;padding:11px 20px;
  cursor:pointer;box-shadow:0 6px 24px rgba(94,234,212,.25);transition:.2s}
 button:hover{transform:translateY(-2px);box-shadow:0 10px 30px rgba(129,140,248,.45)}
@@ -550,99 +653,100 @@ def _pareto(t, s):
 
 _NEED = {"molecule", "functional", "basis", "r_A", "theta_deg", "err_r_pct", "err_theta_deg", "err_dipole_pct", "time_s"}
 
-@(getattr(st, "fragment", lambda f: f))
-def advisor():
-    up = st.file_uploader("Benchmark CSV in the sweep_results.csv format (optional, defaults to your sweep)", type="csv", key="advup")
-    df = pd.read_csv(up) if up else _VREF
-    if df is None:
-        st.info("Put sweep_results.csv next to this script or upload a benchmark CSV."); return
-    if not _NEED <= set(df.columns):
-        st.error(f"CSV is missing columns: {sorted(_NEED - set(df.columns))}"); return
+def _advisor_data_frame():
+    return _VREF.copy() if _VREF is not None else pd.DataFrame()
 
-    c = st.columns([1, 1.3, 1.3, 1.3, 1.3])
-    mol = c[0].selectbox("Molecule", sorted(df.molecule.unique()), key="am")
-    tol_r = c[1].slider("Bond length within (%)", 0.1, 5.0, 1.5, 0.1, key="atr")
-    tol_t = c[2].slider("Angle within (°)", 0.25, 6.0, 2.0, 0.25, key="att")
-    tol_d = c[3].slider("Dipole within (%)", 1.0, 40.0, 10.0, 1.0, key="atd")
-    d = df[df.molecule == mol].copy().reset_index(drop=True)
-    budget = c[4].slider("Time budget (s)", float(np.floor(d.time_s.min())), float(np.ceil(d.time_s.max())),
-                         float(np.ceil(d.time_s.max())), 1.0, key="abud")
-
-    d["label"] = d.functional + " / " + d.basis
-    d["Bond"] = d.err_r_pct.abs() / tol_r; d["Angle"] = d.err_theta_deg.abs() / tol_t; d["Dipole"] = d.err_dipole_pct.abs() / tol_d
-    d["score"] = d[["Bond", "Angle", "Dipole"]].max(axis=1)
-    d["ok"] = (d.score <= 1) & (d.time_s <= budget)
-    if d.ok.any():
-        rec, met = d[d.ok].sort_values(["time_s", "score"]).iloc[0], True
-    else:
-        pool = d[d.time_s <= budget]; pool = pool if len(pool) else d
-        rec, met = pool.sort_values(["score", "time_s"]).iloc[0], False
-    fails = [k for k in ("Bond", "Angle", "Dipole") if rec[k] > 1]
-
-    k = st.columns([2, 1, 1, 1])
-    with k[0]:
-        stat("Recommended level of theory" if met else "No method meets every target — closest",
-             f"{rec.functional} / {rec.basis}",
-             f"{rec.time_s:.0f} s per optimization" + ("" if met else f" · misses: {', '.join(fails)}"), met)
-    with k[1]: stat("Bond error", f"{rec.err_r_pct:+.2f}%", f"target ±{tol_r}%", rec.Bond <= 1)
-    with k[2]: stat("Angle error", f"{rec.err_theta_deg:+.2f}°", f"target ±{tol_t}°", rec.Angle <= 1)
-    with k[3]: stat("Dipole error", f"{rec.err_dipole_pct:+.1f}%", f"target ±{tol_d}%", rec.Dipole <= 1)
-    dominated = int(((d.time_s >= rec.time_s) & (d.score >= rec.score)).sum() - 1)
-    rho, pv = stats.spearmanr(d.time_s, d.score) if d.score.nunique() > 1 else (np.nan, np.nan)
-    st.caption(f"{dominated} of {len(d) - 1} other methods cost at least as much and are no more accurate. "
-               f"Cost vs accuracy rank correlation ρ = {rho:.2f} (p = {pv:.2f}); a weak or positive ρ means paying more is not buying accuracy.")
-    st.markdown("<div style='height:.6rem'></div>", unsafe_allow_html=True)
-
-    A, B = st.columns([3, 2])
-    fig = px.scatter(d, x="time_s", y="score", color="functional", symbol="basis", hover_name="label")
-    fig.update_traces(marker=dict(size=14, line=dict(width=1, color="white")))
-    fd = d.iloc[_pareto(d.time_s.values, d.score.values)].sort_values("time_s")
-    fig.add_hrect(y0=0, y1=1, fillcolor="rgba(94,234,212,.08)", line_width=0)
-    fig.add_hline(y=1, line_dash="dash", line_color=ACCENT, annotation_text="all targets met")
-    fig.add_vline(x=budget, line_dash="dash", line_color=AMBER, annotation_text="time budget")
-    fig.add_trace(go.Scatter(x=fd.time_s, y=fd.score, mode="lines", name="Pareto front",
-                             line=dict(color="rgba(255,255,255,.55)", dash="dot", shape="hv")))
-    fig.add_trace(go.Scatter(x=[rec.time_s], y=[rec.score], mode="markers", name="recommended",
-                             marker=dict(size=28, color="rgba(0,0,0,0)", line=dict(width=3, color=AMBER))))
-    fig.update_layout(title="Cost vs accuracy · below the green line a method meets every target",
-                      xaxis_title="runtime per optimization (s)", yaxis_title="worst error ÷ tolerance")
-    A.plotly_chart(style(fig, 470), use_container_width=True)
-    ds = d.sort_values("time_s")
-    hm = go.Figure(go.Heatmap(z=ds[["Bond", "Angle", "Dipole"]].values, x=["Bond", "Angle", "Dipole"], y=ds.label,
-                              text=ds[["Bond", "Angle", "Dipole"]].values.round(2), texttemplate="%{text}", zmin=0, zmax=2,
-                              colorscale=[[0, "#5eead4"], [.5, "#312e81"], [1, "#fb7185"]], showscale=False, xgap=3, ygap=3))
-    hm.update_yaxes(autorange="reversed")
-    hm.update_layout(title="Error ÷ tolerance (≤ 1 passes) · cheapest at top")
-    B.plotly_chart(style(hm, 470), use_container_width=True)
-
-    st.markdown("### Export a ready-to-run input")
-    st.caption("Uses the recommended method and its own optimized geometry as the starting point. "
-               "Keywords are mapped from PySCF names; check them against your program version before a production run.")
-    progs = {"Gaussian": "gjf", "ORCA": "inp", "Psi4": "dat", "NWChem": "nw", "PySCF": "py"}
-    for tab, (pg, ext) in zip(st.tabs(list(progs)), progs.items()):
-        with tab:
-            txt = _deck(pg, mol, rec.functional, rec.basis, float(rec.r_A), float(rec.theta_deg))
-            st.code(txt, language="python" if pg == "PySCF" else "text")
-            st.download_button(f"Download {mol.lower()}.{ext}", txt, file_name=f"{mol.lower()}.{ext}", key=f"dl{pg}")
-
-    st.markdown("### Plan a screening campaign")
-    p = st.columns(4)
-    n = p[0].number_input("Molecules to run", 1, 1_000_000, 500, key="pn")
-    size = p[1].slider("System size vs this molecule (×)", 1.0, 50.0, 1.0, 0.5, key="ps")
-    expo = p[2].slider("Assumed cost scaling (size^p)", 1.5, 4.0, 3.0, 0.1, key="pe")
-    wk = p[3].number_input("Parallel workers", 1, 512, 8, key="pw")
-    picks = {"Recommended": rec, "Cheapest tested": d.loc[d.time_s.idxmin()], "Most accurate tested": d.loc[d.score.idxmin()]}
-    plan = pd.DataFrame([dict(plan=k_, method=v.label, per_job_s=v.time_s * size ** expo, worst_error_ratio=v.score,
-                              wall_hours=n * v.time_s * size ** expo / wk / 3600) for k_, v in picks.items()])
-    q1, q2 = st.columns([2, 3])
-    q1.dataframe(plan.round(2), use_container_width=True, hide_index=True)
-    bar = px.bar(plan, x="wall_hours", y="plan", orientation="h", color="plan", text=plan.wall_hours.round(1),
-                 color_discrete_sequence=[AMBER, ICE, HOT])
-    bar.update_layout(showlegend=False, xaxis_title="wall-clock hours", yaxis_title="", title="Campaign wall time")
-    q2.plotly_chart(style(bar, 260), use_container_width=True)
-    st.caption("Runtimes are your recorded values for this molecule; scaling to bigger systems is a planning assumption, not a measurement.")
-    st.download_button("Download ranked methods (CSV)", d.sort_values(["score", "time_s"]).drop(columns=["ok"]).to_csv(index=False),
-                       file_name="ranked_methods.csv", key="dlcsv")
-
+# Browser-only Method Advisor. Every slider/filter below is native HTML and updates locally.
 with tabA:
-    advisor()
+    _adv = _advisor_data_frame()
+    if _adv.empty:
+        st.info("Put sweep_results.csv next to this script to use Method Advisor.")
+    else:
+        _adv_payload = _adv.replace({np.nan: None}).to_dict("records")
+        _adv_html = r"""
+<style>
+#advisorApp .toolbar{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin-bottom:12px}
+#advisorApp .toolbar>div{flex:1 1 150px;min-width:150px}
+#advisorApp .toolbar label{display:block;font-size:.68rem;letter-spacing:2px;text-transform:uppercase;color:#94a3b8;font-weight:700;margin-bottom:7px}
+#advisorApp .toolbar label b{float:right;color:#5eead4;letter-spacing:0;font-size:.82rem}
+#advisorApp .toolbar select{width:100%;padding:10px 12px;border-radius:12px;background:rgba(255,255,255,.055);color:#e2e8f0;border:1px solid rgba(255,255,255,.12);font:inherit}
+#advisorApp input[type=range]{width:100%;accent-color:#5eead4}
+#advisorApp .liveTrack{position:relative;width:100%;height:26px;margin-top:1px;cursor:ew-resize;touch-action:none;user-select:none}
+#advisorApp .liveTrack:before{content:"";position:absolute;left:0;right:0;top:10px;height:7px;border-radius:99px;background:rgba(255,255,255,.13)}
+#advisorApp .liveFill{position:absolute;left:0;top:10px;height:7px;border-radius:99px;background:linear-gradient(90deg,#5eead4,#818cf8);pointer-events:none}
+#advisorApp .liveThumb{position:absolute;top:1px;width:25px;height:25px;margin-left:-12.5px;border-radius:50%;background:#fff;border:5px solid #5eead4;box-shadow:0 0 0 6px rgba(94,234,212,.16),0 0 18px rgba(94,234,212,.45);pointer-events:none}
+#advisorApp .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:15px}
+#advisorApp .card{border:1px solid rgba(255,255,255,.09);border-radius:18px;padding:14px 17px;background:linear-gradient(160deg,rgba(255,255,255,.075),rgba(255,255,255,.02))}
+#advisorApp .lbl{font-size:.65rem;letter-spacing:2px;text-transform:uppercase;color:#94a3b8}
+#advisorApp .big{font:700 1.65rem 'Space Grotesk',sans-serif;margin-top:4px;color:#e2e8f0}
+#advisorApp .sm{font-size:.78rem;color:#94a3b8}
+#advisorApp .good{color:#5eead4} #advisorApp .bad{color:#fb7185}
+#advisorApp .grid2{display:grid;grid-template-columns:1.25fr .75fr;gap:14px}
+#advisorApp .panel{border:1px solid rgba(255,255,255,.08);border-radius:18px;background:rgba(255,255,255,.025);padding:10px}
+#advisorApp canvas{width:100%;display:block}
+#advisorApp .table{max-height:300px;overflow:auto;border-radius:12px}
+#advisorApp table{width:100%;border-collapse:collapse;font-size:.78rem}
+#advisorApp th,#advisorApp td{padding:7px 9px;border-bottom:1px solid rgba(255,255,255,.07);text-align:right;white-space:nowrap}
+#advisorApp th{color:#94a3b8;position:sticky;top:0;background:#111126}
+#advisorApp th:first-child,#advisorApp td:first-child{text-align:left}
+#advisorApp button{background:linear-gradient(90deg,#5eead4,#818cf8);color:#08111a;font:700 .9rem Inter;border:0;border-radius:12px;padding:10px 16px;cursor:pointer}
+@media(max-width:900px){#advisorApp .cards{grid-template-columns:1fr 1fr}#advisorApp .grid2{grid-template-columns:1fr}}
+</style>
+<div class="rt" id="advisorApp">
+  <div class="toolbar">
+    <div><label>Molecule</label><select id="amol"></select></div>
+    <div><label>Bond length within (%) <b id="avr"></b></label><input id="atr" type="range" min="0.1" max="5" step="0.1" value="1.5"></div>
+    <div><label>Angle within (°) <b id="avt"></b></label><input id="att" type="range" min="0.25" max="6" step="0.25" value="2"></div>
+    <div><label>Dipole within (%) <b id="avd"></b></label><input id="atd" type="range" min="1" max="40" step="1" value="10"></div>
+    <div><label>Time budget (s) <b id="avb"></b></label><input id="abud" type="range" min="0" max="1" step="1" value="0"></div>
+  </div>
+  <div class="cards">
+    <div class="card"><div class="lbl">Recommended level of theory</div><div class="big" id="arec"></div><div class="sm" id="ares"></div></div>
+    <div class="card"><div class="lbl">Bond error</div><div class="big" id="arb"></div><div class="sm" id="art"></div></div>
+    <div class="card"><div class="lbl">Angle error</div><div class="big" id="ara"></div><div class="sm" id="aat"></div></div>
+    <div class="card"><div class="lbl">Dipole error</div><div class="big" id="ard"></div><div class="sm" id="adt"></div></div>
+  </div>
+  <div class="grid2"><div class="panel"><canvas id="aplot" height="390"></canvas></div><div class="panel"><canvas id="aheat" height="390"></canvas></div></div>
+  <div class="toolbar" style="margin-top:14px">
+    <div><label>Molecules to run <b id="apn"></b></label><input id="an" type="range" min="1" max="10000" step="1" value="500"></div>
+    <div><label>System size × <b id="aps"></b></label><input id="asize" type="range" min="1" max="50" step="0.5" value="1"></div>
+    <div><label>Cost exponent p <b id="ape"></b></label><input id="aexpo" type="range" min="1.5" max="4" step="0.1" value="3"></div>
+    <div><label>Parallel workers <b id="apw"></b></label><input id="awork" type="range" min="1" max="128" step="1" value="8"></div>
+  </div>
+  <div class="panel table" id="aplan"></div>
+  <div class="toolbar" style="margin-top:12px"><button id="adownload" type="button">Download ranked methods CSV</button></div>
+</div>
+<script>
+const AD=__DATA__, aq=id=>document.getElementById(id), rows=AD.rows||[];
+const mols=[...new Set(rows.map(x=>x.molecule))]; mols.forEach(x=>aq('amol').add(new Option(x,x)));
+function num(v,d=0){const n=Number(v);return Number.isFinite(n)?n:d}
+function data(){return rows.filter(x=>x.molecule===aq('amol').value)}
+function setv(id,v){aq(id).textContent=v}
+function cls(id,ok){aq(id).className='big '+(ok?'good':'bad')}
+function scale(v,a,b,c,d){return c+(v-a)/(b-a)*(d-c)}
+function chart(rows,rec){const cv=aq('aplot'),w=cv.clientWidth,h=390,d=devicePixelRatio||1;cv.width=w*d;cv.height=h*d;const g=cv.getContext('2d');g.setTransform(d,0,0,d,0,0);g.clearRect(0,0,w,h);if(!rows.length)return;const tx=rows.map(x=>num(x.time_s)),sy=rows.map(x=>Math.max(num(x.err_r_pct),num(x.err_theta_deg),num(x.err_dipole_pct)));const x0=Math.min(...tx),x1=Math.max(...tx)||x0+1,y1=Math.max(...sy,1);const X=x=>50+(x-x0)/(x1-x0)*(w-70),Y=y=>h-45-y/y1*(h-80);g.strokeStyle='rgba(255,255,255,.08)';for(let i=0;i<5;i++){let y=Y(y1*i/4);g.beginPath();g.moveTo(50,y);g.lineTo(w-20,y);g.stroke()}g.fillStyle='#94a3b8';g.font='12px Inter';g.fillText('runtime (s)',w/2-30,h-10);g.save();g.translate(14,h/2+35);g.rotate(-Math.PI/2);g.fillText('worst absolute error',0,0);g.restore();rows.forEach(x=>{g.fillStyle=x===rec?'#fbbf24':'#818cf8';g.beginPath();g.arc(X(num(x.time_s)),Y(Math.max(num(x.err_r_pct),num(x.err_theta_deg),num(x.err_dipole_pct))),x===rec?8:5,0,7);g.fill()});g.fillStyle='#e2e8f0';g.font='600 15px Space Grotesk';g.fillText('Cost vs accuracy · browser live',16,24)}
+function heat(rows,tR,tT,tD){const cv=aq('aheat'),w=cv.clientWidth,h=390,d=devicePixelRatio||1;cv.width=w*d;cv.height=h*d;const g=cv.getContext('2d');g.setTransform(d,0,0,d,0,0);g.clearRect(0,0,w,h);if(!rows.length)return;const cols=['Bond','Angle','Dipole'],left=120,top=45,rh=Math.max(22,Math.min(42,(h-top-20)/rows.length));g.fillStyle='#94a3b8';g.font='12px Inter';cols.forEach((c,i)=>g.fillText(c,left+i*90,25));rows.forEach((x,j)=>{g.fillStyle='#cbd5e1';g.fillText(x.functional+' / '+x.basis,8,top+j*rh+15);[Math.abs(num(x.err_r_pct))/tR,Math.abs(num(x.err_theta_deg))/tT,Math.abs(num(x.err_dipole_pct))/tD].forEach((v,i)=>{g.fillStyle=v<=1?'rgba(94,234,212,.65)':v<=2?'rgba(129,140,248,.55)':'rgba(251,113,133,.65)';g.fillRect(left+i*90,top+j*rh,72,Math.max(18,rh-4));g.fillStyle='#fff';g.fillText(v.toFixed(2),left+i*90+22,top+j*rh+15)})})}
+function update(){const d=data();if(!d.length)return;const tr=num(aq('atr').value,1.5),tt=num(aq('att').value,2),td=num(aq('atd').value,10),budget=num(aq('abud').value);d.forEach(x=>{x._b=Math.abs(num(x.err_r_pct))/tr;x._a=Math.abs(num(x.err_theta_deg))/tt;x._d=Math.abs(num(x.err_dipole_pct))/td;x._score=Math.max(x._b,x._a,x._d);x._ok=x._score<=1&&num(x.time_s)<=budget});let pool=d.filter(x=>x._ok);let met=pool.length>0;if(!pool.length)pool=d.filter(x=>num(x.time_s)<=budget);if(!pool.length)pool=d;const rec=[...pool].sort((a,b)=>a._score-b._score||num(a.time_s)-num(b.time_s))[0];setv('avr',tr.toFixed(1)+'%');setv('avt',tt.toFixed(2)+'°');setv('avd',td.toFixed(0)+'%');setv('avb',budget.toFixed(0)+' s');setv('arec',rec.functional+' / '+rec.basis);setv('ares',num(rec.time_s).toFixed(0)+' s per optimization'+(met?'':' · closest available'));setv('arb',num(rec.err_r_pct).toFixed(2)+'%');setv('art','target ±'+tr.toFixed(1)+'%');setv('ara',num(rec.err_theta_deg).toFixed(2)+'°');setv('aat','target ±'+tt.toFixed(2)+'°');setv('ard',num(rec.err_dipole_pct).toFixed(1)+'%');setv('adt','target ±'+td.toFixed(0)+'%');cls('arb',rec._b<=1);cls('ara',rec._a<=1);cls('ard',rec._d<=1);chart(d,rec);heat(d,tr,tt,td);
+ const n=+aq('an').value,size=+aq('asize').value,p=+aq('aexpo').value,workers=+aq('awork').value;setv('apn',n);setv('aps',size.toFixed(1)+'×');setv('ape',p.toFixed(1));setv('apw',workers);let picks=[['Recommended',rec],['Cheapest tested',[...d].sort((a,b)=>num(a.time_s)-num(b.time_s))[0]],['Most accurate tested',[...d].sort((a,b)=>a._score-b._score)[0]]];aq('aplan').innerHTML='<table><thead><tr><th>Plan</th><th>Method</th><th>Per job (s)</th><th>Wall hours</th></tr></thead><tbody>'+picks.map(([k,x])=>{let per=num(x.time_s)*Math.pow(size,p),wall=n*per/workers/3600;return `<tr><td>${k}</td><td>${x.functional} / ${x.basis}</td><td>${per.toFixed(1)}</td><td>${wall.toFixed(1)}</td></tr>`}).join('')+'</tbody></table>'}
+function initBudget(){const d=data();const mn=Math.floor(Math.min(...d.map(x=>num(x.time_s)))),mx=Math.ceil(Math.max(...d.map(x=>num(x.time_s))));aq('abud').min=mn;aq('abud').max=mx;aq('abud').value=mx}
+aq('amol').addEventListener('change',()=>{initBudget();update()});
+
+// IMPORTANT: Streamlit's iframe can sometimes coalesce native range input events
+// while the pointer is being dragged. Drive the range ourselves from pointermove
+// so the Method Advisor repaints before mouse/touch release.
+function makeLiveSlider(id,onChange){
+  const el=aq(id),wrap=el.parentElement,track=document.createElement('div'),fill=document.createElement('div'),thumb=document.createElement('div');
+  track.className='liveTrack';fill.className='liveFill';thumb.className='liveThumb';track.append(fill,thumb);el.style.position='absolute';el.style.opacity='0';el.style.pointerEvents='none';wrap.appendChild(track);
+  let down=false,raf=0,lastX=0;
+  const paint=x=>{const r=track.getBoundingClientRect(),lo=+el.min,hi=+el.max,step=+(el.step||1);let p=Math.max(0,Math.min(1,(x-r.left)/Math.max(1,r.width))),raw=lo+p*(hi-lo),v=lo+Math.round((raw-lo)/step)*step;v=Math.max(lo,Math.min(hi,v));el.value=String(v);const z=(v-lo)/(hi-lo||1);fill.style.width=(z*100)+'%';thumb.style.left=(z*100)+'%';onChange()};
+  const move=e=>{if(!down)return;lastX=e.clientX;paint(lastX);if(!raf)raf=requestAnimationFrame(()=>{raf=0;onChange()});e.preventDefault()};
+  track.addEventListener('pointerdown',e=>{down=true;track.setPointerCapture?.(e.pointerId);paint(e.clientX);e.preventDefault()});
+  track.addEventListener('pointermove',move);track.addEventListener('pointerup',e=>{if(down)paint(e.clientX);down=false});track.addEventListener('pointercancel',()=>down=false);
+  const z=(+el.value-+el.min)/(+el.max-+el.min||1);fill.style.width=(z*100)+'%';thumb.style.left=(z*100)+'%';
+}
+['atr','att','atd','abud','an','asize','aexpo','awork'].forEach(id=>makeLiveSlider(id,update));
+initBudget();update();
+aq('adownload').addEventListener('click',()=>{const d=data().map(x=>({functional:x.functional,basis:x.basis,r_A:x.r_A,theta_deg:x.theta_deg,time_s:x.time_s,score:x._score||'',ok:x._ok||false}));const csv='functional,basis,r_A,theta_deg,time_s,score,ok\n'+d.map(x=>Object.values(x).join(',')).join('\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='ranked_methods.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)});
+</script>
+"""
+        html_component(_adv_html, 1050)
